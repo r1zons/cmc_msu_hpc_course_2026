@@ -125,6 +125,36 @@ cat results/polus/openmp_benchmark_JOB_ID.csv
 ls results/polus/openmp_benchmark_JOB_ID_raw/
 ```
 
+### Separate scaling jobs
+
+For independent scheduling at 1, 2, 4, 8, 16, and 20 threads, use the batch
+submission helper. Each LSF job requests exactly its thread count and performs
+three sequential repetitions. Validate all six job files without submitting:
+
+```sh
+bash scripts/polus/submit_openmp_scaling.sh --dry-run
+```
+
+After building and testing with the configured Conda environment, submit all
+six jobs and monitor them:
+
+```sh
+bash scripts/polus/submit_openmp_scaling.sh
+bjobs
+```
+
+Each job writes separate scheduler logs named
+`logs/polus/openmp_scaling_<threads>t.JOB_ID.{out,err}`. Its three-row CSV is
+`results/polus/openmp_<threads>t_JOB_ID.csv`, and raw solver output is retained
+in `results/polus/openmp_<threads>t_JOB_ID_raw/`. For example:
+
+```sh
+cat logs/polus/openmp_scaling_16t.JOB_ID.out
+cat logs/polus/openmp_scaling_16t.JOB_ID.err
+cat results/polus/openmp_16t_JOB_ID.csv
+ls results/polus/openmp_16t_JOB_ID_raw/
+```
+
 ## Scope
 
 V1 uses C++17, `double`, three contiguous time-layer arrays, and OpenMP. It has

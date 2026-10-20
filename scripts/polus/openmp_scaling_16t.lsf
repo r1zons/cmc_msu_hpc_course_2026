@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+#BSUB -J wave_scale_16t
+#BSUB -n 16
+#BSUB -W 00:15
+#BSUB -q normal
+#BSUB -o logs/polus/openmp_scaling_16t.%J.out
+#BSUB -e logs/polus/openmp_scaling_16t.%J.err
+#BSUB -R "span[hosts=1]"
+#BSUB -x
+
+exec bash scripts/polus/benchmark_openmp_per_thread.sh 16
