@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #BSUB -J wave_pilot_n256
 #BSUB -n 16
+#BSUB -W 03:00
 #BSUB -q normal
 #BSUB -o logs/polus/large_grid_pilot_n256.%J.out
 #BSUB -e logs/polus/large_grid_pilot_n256.%J.err
 #BSUB -R "span[hosts=1]"
 #BSUB -x
 
-# Walltime is supplied explicitly by submit_large_grid_pilots.sh via bsub -W.
 exec bash scripts/polus/large_grid_pilot.sh 256 512

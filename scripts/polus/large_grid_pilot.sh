@@ -94,9 +94,6 @@ set -u
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 [[ -x "$solver" ]] || fail "$solver is missing or not executable; build before submission"
-[[ -x /usr/bin/time ]] || fail 'GNU /usr/bin/time is required to record peak memory usage'
-/usr/bin/time -f '' -o /dev/null true 2>/dev/null ||
-    fail '/usr/bin/time does not support the required GNU output format'
 
 reference_error=$(awk -v n="$n" -v steps="$steps" 'BEGIN {
     pi = atan2(0, -1)
@@ -124,11 +121,10 @@ estimated_layer_bytes=$((3 * side * side * side * 8))
 results_root=${PILOT_RESULTS_DIR:-results/polus}
 base_name=large_grid_pilot_n${n}_${job_id}
 raw_file=$results_root/${base_name}.out
-resource_file=$results_root/${base_name}.resources
 csv_file=$results_root/${base_name}.csv
 
 mkdir -p "$results_root" || fail "cannot create results directory: $results_root"
-[[ ! -e "$raw_file" && ! -e "$resource_file" && ! -e "$csv_file" ]] ||
+[[ ! -e "$raw_file" && ! -e "$csv_file" ]] ||
     fail "pilot results already exist for job ID: $job_id"
 
 {
@@ -148,11 +144,10 @@ export OMP_DYNAMIC=FALSE
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 
-LC_ALL=C /usr/bin/time -f 'max_rss_kb=%M' -o "$resource_file" \
-    "$solver" \
-        --n "$n" --lx 1 --ly 1 --lz 1 \
-        --time 1 --steps "$steps" --threads "$threads" \
-        >>"$raw_file" 2>&1
+LC_ALL=C "$solver" \
+    --n "$n" --lx 1 --ly 1 --lz 1 \
+    --time 1 --steps "$steps" --threads "$threads" \
+    >>"$raw_file" 2>&1
 solver_status=$?
 printf 'exit_code=%d\n' "$solver_status" >>"$raw_file"
 ((solver_status == 0)) || fail "solver failed; see $raw_file"
@@ -166,17 +161,12 @@ fi
 if ! max_error=$(read_output_value max_absolute_error "$raw_file"); then
     fail "missing or duplicate numerical error in $raw_file"
 fi
-if ! max_rss_kb=$(read_output_value max_rss_kb "$resource_file"); then
-    fail "missing or duplicate peak memory value in $resource_file"
-fi
-
 [[ "$effective_threads" =~ ^[0-9]+$ ]] ||
     fail "malformed effective thread count: $effective_threads"
 ((effective_threads == threads)) ||
     fail "effective thread count $effective_threads does not match requested count $threads"
 is_nonnegative_number "$solve_time" || fail "invalid solve time: $solve_time"
 is_nonnegative_number "$max_error" || fail "invalid numerical error: $max_error"
-[[ "$max_rss_kb" =~ ^[0-9]+$ ]] || fail "invalid peak memory value: $max_rss_kb"
 
 error_difference=$(awk -v actual="$max_error" -v expected="$reference_error" 'BEGIN {
     difference = actual - expected
@@ -192,16 +182,15 @@ if ! awk -v difference="$error_difference" -v tolerance="$error_tolerance" \
 fi
 
 printf '%s\n' \
-    'job_id,hostname,n,lx,ly,lz,physical_final_time,time_steps,requested_threads,effective_threads,solve_wall_seconds,max_absolute_error,reference_error,error_difference,max_rss_kb,estimated_three_layer_bytes,exit_code' \
+    'job_id,hostname,n,lx,ly,lz,physical_final_time,time_steps,requested_threads,effective_threads,solve_wall_seconds,max_absolute_error,reference_error,error_difference,estimated_three_layer_bytes,exit_code' \
     >"$csv_file" || fail "cannot create CSV file: $csv_file"
-printf '%s,%s,%d,1,1,1,1,%d,%d,%d,%s,%s,%s,%s,%s,%d,%d\n' \
+printf '%s,%s,%d,1,1,1,1,%d,%d,%d,%s,%s,%s,%s,%d,%d\n' \
     "$job_id" "$host_name" "$n" "$steps" "$threads" "$effective_threads" \
     "$solve_time" "$max_error" "$reference_error" "$error_difference" \
-    "$max_rss_kb" "$estimated_layer_bytes" "$solver_status" \
+    "$estimated_layer_bytes" "$solver_status" \
     >>"$csv_file" || fail "cannot write CSV result: $csv_file"
 
 printf 'pilot_csv=%s\n' "$csv_file"
 printf 'pilot_raw_output=%s\n' "$raw_file"
-printf 'pilot_resource_output=%s\n' "$resource_file"
 printf 'pilot_status=success\n'
 finish 0

@@ -2,34 +2,20 @@
 
 set -u
 
-walltime=''
 dry_run=FALSE
 
 while (($# > 0)); do
     case "$1" in
-        --walltime)
-            [[ $# -ge 2 ]] || {
-                printf 'error: --walltime requires HH:MM\n' >&2
-                exit 2
-            }
-            walltime=$2
-            shift 2
-            ;;
         --dry-run)
             dry_run=TRUE
             shift
             ;;
         *)
-            printf 'Usage: %s --walltime HH:MM [--dry-run]\n' "$0" >&2
+            printf 'Usage: %s [--dry-run]\n' "$0" >&2
             exit 2
             ;;
     esac
 done
-
-[[ "$walltime" =~ ^[0-9]+:[0-5][0-9]$ ]] || {
-    printf 'error: provide an LSF walltime as HH:MM after checking the queue limit\n' >&2
-    exit 2
-}
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$script_dir/../.." && pwd)
@@ -61,6 +47,7 @@ for n in 256 512; do
         exit 1
     }
     grep -Fxq '#BSUB -q normal' "$job_file" || exit 1
+    grep -Fxq '#BSUB -W 03:00' "$job_file" || exit 1
     grep -Fxq '#BSUB -R "span[hosts=1]"' "$job_file" || exit 1
     grep -Fxq '#BSUB -x' "$job_file" || exit 1
 
@@ -71,9 +58,9 @@ for n in 256 512; do
     fi
 
     if [[ "$dry_run" == TRUE ]]; then
-        printf 'validated: bsub -W %s < %s (slots=16)\n' "$walltime" "$job_file"
+        printf 'validated: bsub < %s (slots=16, walltime=03:00)\n' "$job_file"
     else
-        printf 'submitting: %s (slots=16, walltime=%s)\n' "$job_file" "$walltime"
-        bsub -W "$walltime" <"$job_file" || exit 1
+        printf 'submitting: %s (slots=16, walltime=03:00)\n' "$job_file"
+        bsub <"$job_file" || exit 1
     fi
 done

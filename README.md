@@ -158,30 +158,35 @@ ls results/polus/openmp_16t_JOB_ID_raw/
 ### Large-grid pilot
 
 Two one-run pilot jobs cover `N=256, K=512` and `N=512, K=1024`, both with 16
-threads. They record solver timing, numerical error, and peak resident memory.
+threads. They record solver timing, numerical error, effective thread count,
+job ID, hostname, and exit status in per-job CSV files.
 Error is checked against an independently evaluated discrete sine-mode
 recurrence for each grid, with an absolute comparison tolerance of `1e-9`.
 
-No walltime is guessed in the job files. Check the current `normal` queue limits
-on Polus, choose an allowed `HH:MM` value, and validate the resulting submission
-commands before submitting:
+The pilot job files request `03:00`, matching the confirmed 180-minute run limit
+of the `normal` queue. Verify that limit before submitting, then validate and
+submit without overriding the directives in the files:
 
 ```sh
 bqueues -l normal
-bash scripts/polus/submit_large_grid_pilots.sh --walltime HH:MM --dry-run
-bash scripts/polus/submit_large_grid_pilots.sh --walltime HH:MM
+bash scripts/polus/submit_large_grid_pilots.sh --dry-run
+bash scripts/polus/submit_large_grid_pilots.sh
 bjobs
 ```
 
 Each job writes separate LSF logs under `logs/polus/`. Structured and raw pilot
-results use the job ID in their filenames:
+results use the job ID in their filenames. Peak memory is reported by LSF in
+its standard job resource summary; the running script does not parse or copy it
+into the CSV. Inspect the scheduler stdout log (and `bjobs -l` or `bhist -l`, as
+available on Polus) for that summary:
 
 ```sh
 cat logs/polus/large_grid_pilot_n256.JOB_ID.out
 cat logs/polus/large_grid_pilot_n512.JOB_ID.out
 cat results/polus/large_grid_pilot_n256_JOB_ID.csv
 cat results/polus/large_grid_pilot_n512_JOB_ID.csv
-cat results/polus/large_grid_pilot_n512_JOB_ID.resources
+bjobs -l JOB_ID
+bhist -l JOB_ID
 ```
 
 ## Scope
