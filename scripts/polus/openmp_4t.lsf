@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#BSUB -J wave_omp_4t
+#BSUB -n 4
+#BSUB -W 00:15
+#BSUB -q normal
+#BSUB -o logs/polus/openmp_4t.%J.out
+#BSUB -e logs/polus/openmp_4t.%J.err
+#BSUB -R "span[hosts=1]"
+#BSUB -x
+
+set -u
+
+requested_threads=4
+job_id=${LSB_JOBID:-unknown}
+host_name=$(hostname 2>/dev/null || uname -n)
+
+finish() {
+    status=$1
+    printf 'completed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'exit_code=%d\n' "$status"
+    exit "$status"
+}
+
+fail() {
+    printf 'error: %s\n' "$1" >&2
+    finish 2
+}
+
+printf 'job_id=%s\n' "$job_id"
+printf 'hostname=%s\n' "$host_name"
+printf 'started_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+printf 'requested_openmp_threads=%d\n' "$requested_threads"
+
+repo_root=${LS_SUBCWD:-}
+[[ -n "$repo_root" ]] || fail 'LS_SUBCWD is unavailable; submit from the repository root'
+cd "$repo_root" || fail "cannot enter submission directory: $repo_root"
+[[ -f Makefile && -f SPEC.md ]] || fail "submission directory is not the repository root: $repo_root"
+[[ -x build/wave_solver ]] || fail 'build/wave_solver is missing or not executable; build before submission'
+
+export OMP_NUM_THREADS=$requested_threads
+export OMP_DYNAMIC=FALSE
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+
+./build/wave_solver \
+    --n 128 --lx 1 --ly 1 --lz 1 \
+    --time 1 --steps 256 --threads "$requested_threads"
+solver_status=$?
+finish "$solver_status"
