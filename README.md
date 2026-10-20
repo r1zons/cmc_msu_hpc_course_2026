@@ -49,19 +49,29 @@ CFL rejection, and basic CLI behavior.
 
 ## IBM Polus (LSF)
 
-Run these commands from the repository root on Polus. First inspect the
-available compiler, GNU Make, LSF commands, and OpenMP support:
+Run these commands from the repository root on Polus. The shared configuration
+in `scripts/polus/config.sh` identifies the confirmed Conda installation and
+environment. First inspect the system compiler, configured Conda compiler, GNU
+Make, LSF commands, and OpenMP support:
 
 ```sh
 bash scripts/polus/check_env.sh
 ```
 
-Build and run the existing tests with GNU Make:
+Initialize and activate the configured Conda environment, then build and test
+with its C++ compiler:
 
 ```sh
+source scripts/polus/config.sh
+source "${POLUS_CONDA_BASE}/etc/profile.d/conda.sh"
+conda activate "${POLUS_CONDA_ENV}"
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+POLUS_CXX=${CXX:-g++}
+command -v "${POLUS_CXX}"
+
 make clean
-make CXX=g++
-make test CXX=g++
+make CXX="${POLUS_CXX}"
+make test CXX="${POLUS_CXX}"
 ```
 
 LSF opens output files before a job script starts, so create the log directory
@@ -85,13 +95,13 @@ cat logs/polus/openmp_4t.JOB_ID.err
 ```
 
 Replace `JOB_ID` in log filenames with the numeric ID printed by `bsub`. The
-jobs request one host, 1 or 4 CPU slots, the `normal` queue, and 15 minutes of
-scheduler walltime. Confirm that the `normal` queue and these resource
-directives match the current Polus configuration before submission. The
-scheduler limit does not impose an algorithmic runtime limit inside the solver.
+jobs request exclusive access to one host, 1 or 4 CPU slots, the `normal`
+queue, and 15 minutes of scheduler walltime. Confirm that the `normal` queue
+and these resource directives match the current Polus configuration before
+submission. The scheduler limit does not impose an algorithmic runtime limit
+inside the solver.
 
 ## Scope
 
 V1 uses C++17, `double`, three contiguous time-layer arrays, and OpenMP. It has
-no MPI, CUDA, alternate boundary variants, scheduler script, or algorithmic
-runtime limit.
+no MPI, CUDA, alternate boundary variants, or algorithmic runtime limit.

@@ -35,7 +35,31 @@ repo_root=${LS_SUBCWD:-}
 [[ -n "$repo_root" ]] || fail 'LS_SUBCWD is unavailable; submit from the repository root'
 cd "$repo_root" || fail "cannot enter submission directory: $repo_root"
 [[ -f Makefile && -f SPEC.md ]] || fail "submission directory is not the repository root: $repo_root"
+
+config_file=scripts/polus/config.sh
+[[ -r "$config_file" ]] || fail "Polus configuration is missing or unreadable: $config_file"
+source "$config_file" || fail "could not read Polus configuration: $config_file"
+
+conda_setup=$POLUS_CONDA_BASE/etc/profile.d/conda.sh
+[[ -r "$conda_setup" ]] || fail "Conda initialization script is missing or unreadable: $conda_setup"
+set +u
+source "$conda_setup"
+conda_init_status=$?
+set -u
+((conda_init_status == 0)) || fail 'could not initialize Conda'
+
+set +u
+conda activate "$POLUS_CONDA_ENV"
+conda_activate_status=$?
+set -u
+((conda_activate_status == 0)) || fail 'could not activate the configured Conda environment'
+[[ -n "${CONDA_PREFIX:-}" && -d "$CONDA_PREFIX/lib" ]] || fail 'activated Conda environment has no usable library directory'
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 [[ -x build/wave_solver ]] || fail 'build/wave_solver is missing or not executable; build before submission'
+
+printf 'conda_environment=%s\n' "$POLUS_CONDA_ENV"
+printf 'conda_prefix=%s\n' "$CONDA_PREFIX"
 
 export OMP_NUM_THREADS=$requested_threads
 export OMP_DYNAMIC=FALSE

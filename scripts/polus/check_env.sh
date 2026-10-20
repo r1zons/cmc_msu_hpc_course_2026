@@ -2,6 +2,17 @@
 
 set -u
 
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+config_file=$script_dir/config.sh
+config_loaded=FALSE
+if [[ -r "$config_file" ]] && source "$config_file"; then
+    config_loaded=TRUE
+    printf 'polus_conda_base=%s\n' "$POLUS_CONDA_BASE"
+    printf 'polus_conda_environment=%s\n' "$POLUS_CONDA_ENV"
+else
+    printf 'polus_config=unavailable (%s)\n' "$config_file"
+fi
+
 printf 'hostname=%s\n' "$(hostname 2>/dev/null || uname -n)"
 printf 'architecture=%s\n' "$(uname -m 2>/dev/null || printf 'unknown')"
 
@@ -19,11 +30,11 @@ if [[ -z "$compiler" ]]; then
 fi
 
 if [[ -n "$compiler" ]]; then
-    printf 'cxx=%s\n' "$(command -v "$compiler")"
-    printf 'cxx_version:\n'
+    printf 'system_cxx=%s\n' "$(command -v "$compiler")"
+    printf 'system_cxx_version:\n'
     "$compiler" --version 2>&1 | sed -n '1,3p'
 else
-    printf 'cxx=not found\n'
+    printf 'system_cxx=not found\n'
 fi
 
 if command -v make >/dev/null 2>&1; then
@@ -46,7 +57,46 @@ printf 'OMP_DYNAMIC=%s\n' "${OMP_DYNAMIC:-unset}"
 printf 'OMP_PLACES=%s\n' "${OMP_PLACES:-unset}"
 printf 'OMP_PROC_BIND=%s\n' "${OMP_PROC_BIND:-unset}"
 
-if [[ -z "$compiler" ]]; then
+conda_compiler=''
+if [[ "$config_loaded" == TRUE ]]; then
+    conda_setup=$POLUS_CONDA_BASE/etc/profile.d/conda.sh
+    if [[ ! -r "$conda_setup" ]]; then
+        printf 'conda_activation=unavailable (%s is not readable)\n' "$conda_setup"
+    else
+        conda_init_status=0
+        conda_activate_status=1
+        set +u
+        source "$conda_setup" || conda_init_status=$?
+        if ((conda_init_status == 0)); then
+            conda activate "$POLUS_CONDA_ENV"
+            conda_activate_status=$?
+        fi
+        set -u
+
+        if ((conda_init_status != 0)); then
+            printf 'conda_activation=failed (could not initialize Conda)\n'
+        elif ((conda_activate_status != 0)); then
+            printf 'conda_activation=failed (could not activate configured environment)\n'
+        elif [[ -z "${CONDA_PREFIX:-}" || ! -d "$CONDA_PREFIX/lib" ]]; then
+            printf 'conda_activation=failed (CONDA_PREFIX/lib is unavailable)\n'
+        else
+            export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            printf 'conda_activation=success\n'
+            printf 'conda_prefix=%s\n' "$CONDA_PREFIX"
+            activated_cxx=${CXX:-g++}
+            if command -v "$activated_cxx" >/dev/null 2>&1; then
+                conda_compiler=$(command -v "$activated_cxx")
+                printf 'conda_cxx=%s\n' "$conda_compiler"
+                printf 'conda_cxx_version:\n'
+                "$conda_compiler" --version 2>&1 | sed -n '1,3p'
+            else
+                printf 'conda_cxx=not found after activation\n'
+            fi
+        fi
+    fi
+fi
+
+if [[ -z "$compiler" && -z "$conda_compiler" ]]; then
     printf 'openmp_probe=skipped (no C++ compiler found)\n'
     exit 0
 fi
@@ -68,7 +118,7 @@ int main() {
 EOF
 
 openmp_compiler=''
-for candidate in "$compiler" g++ c++ clang++ xlC \
+for candidate in "$conda_compiler" "$compiler" g++ c++ clang++ xlC \
         /usr/local/opt/llvm/bin/clang++ /opt/homebrew/opt/llvm/bin/clang++; do
     if command -v "$candidate" >/dev/null 2>&1 && \
             "$candidate" -std=c++17 -fopenmp "$probe_dir/openmp_probe.cpp" \
