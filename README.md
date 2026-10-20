@@ -101,6 +101,30 @@ and these resource directives match the current Polus configuration before
 submission. The scheduler limit does not impose an algorithmic runtime limit
 inside the solver.
 
+### OpenMP scaling benchmark
+
+The benchmark runs 1, 2, 4, and 8 threads in each of three repetition rounds,
+for 12 sequential measurements on one exclusive node. Build and test with the
+configured Conda environment as shown above, then submit from the repository
+root:
+
+```sh
+mkdir -p logs/polus
+bsub < scripts/polus/openmp_benchmark.lsf
+bjobs
+```
+
+LSF writes job logs to `logs/polus/openmp_benchmark.JOB_ID.out` and
+`logs/polus/openmp_benchmark.JOB_ID.err`. Successful measurements are written
+to `results/polus/openmp_benchmark_JOB_ID.csv`; individual solver outputs are
+kept in `results/polus/openmp_benchmark_JOB_ID_raw/` for debugging. Replace
+`JOB_ID` with the numeric ID reported by `bsub`:
+
+```sh
+cat results/polus/openmp_benchmark_JOB_ID.csv
+ls results/polus/openmp_benchmark_JOB_ID_raw/
+```
+
 ## Scope
 
 V1 uses C++17, `double`, three contiguous time-layer arrays, and OpenMP. It has

@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#BSUB -J wave_omp_benchmark
+#BSUB -n 8
+#BSUB -W 00:15
+#BSUB -q normal
+#BSUB -o logs/polus/openmp_benchmark.%J.out
+#BSUB -e logs/polus/openmp_benchmark.%J.err
+#BSUB -R "span[hosts=1]"
+#BSUB -x
+
+set -u
+
+job_id=${LSB_JOBID:-unknown}
+host_name=$(hostname 2>/dev/null || uname -n)
+
+finish() {
+    status=$1
+    printf 'completed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'exit_code=%d\n' "$status"
+    exit "$status"
+}
+
+fail() {
+    printf 'error: %s\n' "$1" >&2
+    finish 2
+}
+
+printf 'job_id=%s\n' "$job_id"
+printf 'hostname=%s\n' "$host_name"
+printf 'started_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+repo_root=${LS_SUBCWD:-}
+[[ -n "$repo_root" ]] || fail 'LS_SUBCWD is unavailable; submit from the repository root'
+cd "$repo_root" || fail "cannot enter submission directory: $repo_root"
+[[ -f Makefile && -f SPEC.md ]] || fail "submission directory is not the repository root: $repo_root"
+
+config_file=scripts/polus/config.sh
+[[ -r "$config_file" ]] || fail "Polus configuration is missing or unreadable: $config_file"
+source "$config_file" || fail "could not read Polus configuration: $config_file"
+
+conda_setup=$POLUS_CONDA_BASE/etc/profile.d/conda.sh
+[[ -r "$conda_setup" ]] || fail "Conda initialization script is missing or unreadable: $conda_setup"
+set +u
+source "$conda_setup"
+conda_init_status=$?
+set -u
+((conda_init_status == 0)) || fail 'could not initialize Conda'
+
+set +u
+conda activate "$POLUS_CONDA_ENV"
+conda_activate_status=$?
+set -u
+((conda_activate_status == 0)) || fail 'could not activate the configured Conda environment'
+[[ -n "${CONDA_PREFIX:-}" && -d "$CONDA_PREFIX/lib" ]] || fail 'activated Conda environment has no usable library directory'
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+[[ -x build/wave_solver ]] || fail 'build/wave_solver is missing or not executable; build before submission'
+[[ -r scripts/polus/benchmark_openmp.sh ]] || fail 'benchmark runner is missing or unreadable'
+
+printf 'conda_environment=%s\n' "$POLUS_CONDA_ENV"
+printf 'conda_prefix=%s\n' "$CONDA_PREFIX"
+
+export OMP_DYNAMIC=FALSE
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+
+bash scripts/polus/benchmark_openmp.sh
+benchmark_status=$?
+finish "$benchmark_status"

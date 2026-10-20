@@ -1,4 +1,5 @@
 /build/
 /logs/
+/results/
 *.log
 .DS_Store
