@@ -14,6 +14,7 @@ CPPFLAGS ?=
 CXXFLAGS ?= -O2 -Wall -Wextra -Wpedantic
 OPENMP_FLAGS ?=
 LDFLAGS ?=
+PYTHON ?= python3
 
 # These flags are part of the project contract. Keep them separate from the
 # user-configurable flags above so command-line overrides cannot remove them.
@@ -42,6 +43,7 @@ $(TEST_RUNNER): tests/test_wave.cpp $(COMMON_SOURCE) include/wave.hpp | $(BUILD_
 test: $(SOLVER) $(TEST_RUNNER)
 	$(TEST_RUNNER)
 	sh tests/test_cli.sh $(SOLVER)
+	$(PYTHON) tests/test_full_v1_benchmark.py
 
 clean:
 	rm -f $(SOLVER) $(TEST_RUNNER)
