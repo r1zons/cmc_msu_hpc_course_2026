@@ -9,9 +9,11 @@ domain_ids=(l1 lpi)
 time_steps=20
 cfl_fraction=0.5
 dry_run=FALSE
+mode=''
+random_seed=20261023
 
 usage() {
-    printf 'Usage: %s [--dry-run]\n' "$0" >&2
+    printf 'Usage: %s --dry-run | --prepare | --submit-next CAMPAIGN_DIRECTORY\n' "$0" >&2
 }
 
 fail() {
@@ -33,14 +35,13 @@ csv_text() {
     printf '%s' "$1" | tr '\n,' ' ;'
 }
 
-while (($# > 0)); do
-    case "$1" in
-        --dry-run) dry_run=TRUE ;;
-        *) usage; exit 2 ;;
-    esac
-    shift
-done
 
+case "${1:-}" in
+    --dry-run) dry_run=TRUE; [[ $# == 1 ]] || exit 2 ;;
+    --prepare) [[ $# == 1 ]] || exit 2 ;;
+    --submit-next) mode=submit; [[ $# == 2 ]] || exit 2; submit_campaign=$2 ;;
+    *) usage; exit 2 ;;
+esac
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || exit 1
 repo_root=$(cd -- "$script_dir/../.." && pwd -P) || exit 1
 cd "$repo_root" || exit 1
@@ -83,82 +84,112 @@ time_parameters() {
         }'
 }
 
-print_plan() {
-    local jobs=0 measurements=0 total_slots=0 n domain_id length threads repetition
-    local group repetitions job_name dt final_time cfl_squared
 
-    printf 'dry_run=true\n'
-    printf 'required_host=%s\nqueue=%s\nwalltime=%s\n' \
-        "$POLUS_FULL_V1_HOST" "$POLUS_FULL_V1_QUEUE" "$POLUS_FULL_V1_WALLTIME"
-    printf 'campaign_root=%s/results/polus/full_v1\n' "$repo_root"
-    printf 'binary_source=%s/build/wave_solver\n' "$repo_root"
-    printf 'benchmark_policy=cfl_scaled_fixed_steps_v1\ntime_steps=%d\ncfl_fraction=%s\n' \
-        "$time_steps" "$cfl_fraction"
+# Explicit Python override; prefer Anaconda base on Polus, compatible local Python otherwise.
+python_executable=${PYTHON:-}
+if [[ -z "$python_executable" ]]; then
+    if [[ -x "$POLUS_CONDA_BASE/bin/python3" ]]; then
+        python_executable=$POLUS_CONDA_BASE/bin/python3
+    else
+        python_executable=python3
+    fi
+fi
+"$python_executable" -c 'import sys; sys.exit(sys.version_info < (3, 7))' ||
+    fail 'Python >=3.7 required; set PYTHON to a compatible interpreter'
 
-    for n in "${grid_sizes[@]}"; do
-        for domain_id in "${domain_ids[@]}"; do
-            length=$(domain_length "$domain_id") || exit 1
-            read -r dt final_time cfl_squared <<<"$(time_parameters "$n" "$length" "$length" "$length")" ||
-                fail "could not calculate time parameters for N=$n, L=$length"
-            printf 'configuration: N=%d L=%s K=%d cfl_fraction=%s dt=%s T=%s cfl_squared=%s\n' \
-                "$n" "$length" "$time_steps" "$cfl_fraction" "$dt" \
-                "$final_time" "$cfl_squared"
-            for threads in "${thread_counts[@]}"; do
-                if ((n == 512)); then
-                    for repetition in 1 2 3; do
-                        group=n${n}_${domain_id}_t${threads}_r${repetition}
-                        job_name=v1_CAMPAIGN_${group}
-                        printf 'job: group=%s name=%s N=%d L=%s K=%d dt=%s T=%s cfl_fraction=%s cfl_squared=%s threads=%d repetitions=%d slots=%d queue=%s walltime=%s host=%s exclusive=yes span_hosts=1\n' \
-                            "$group" "$job_name" "$n" "$length" "$time_steps" \
-                            "$dt" "$final_time" "$cfl_fraction" "$cfl_squared" "$threads" \
-                            "$repetition" "$threads" "$POLUS_FULL_V1_QUEUE" \
-                            "$POLUS_FULL_V1_WALLTIME" "$POLUS_FULL_V1_HOST"
-                        printf '  submit: bsub < CAMPAIGN_DIRECTORY/jobs/%s.lsf\n' "$group"
-                        printf '  measurement: id=%s repetition=%d command=wave_solver --n %d --lx %s --ly %s --lz %s --time %s --steps %d --threads %d\n' \
-                            "$group" "$repetition" "$n" "$length" "$length" "$length" \
-                            "$final_time" "$time_steps" "$threads"
-                        ((jobs += 1))
-                        ((measurements += 1))
-                        ((total_slots += threads))
-                    done
-                else
-                    group=n${n}_${domain_id}_t${threads}_r123
-                    job_name=v1_CAMPAIGN_${group}
-                    printf 'job: group=%s name=%s N=%d L=%s K=%d dt=%s T=%s cfl_fraction=%s cfl_squared=%s threads=%d repetitions=1,2,3 slots=%d queue=%s walltime=%s host=%s exclusive=yes span_hosts=1\n' \
-                        "$group" "$job_name" "$n" "$length" "$time_steps" \
-                        "$dt" "$final_time" "$cfl_fraction" "$cfl_squared" "$threads" \
-                        "$threads" "$POLUS_FULL_V1_QUEUE" \
-                        "$POLUS_FULL_V1_WALLTIME" "$POLUS_FULL_V1_HOST"
-                    printf '  submit: bsub < CAMPAIGN_DIRECTORY/jobs/%s.lsf\n' "$group"
-                    for repetition in 1 2 3; do
-                        printf '  measurement: id=n%d_%s_t%d_r%d repetition=%d command=wave_solver --n %d --lx %s --ly %s --lz %s --time %s --steps %d --threads %d\n' \
-                            "$n" "$domain_id" "$threads" "$repetition" "$repetition" \
-                            "$n" "$length" "$length" "$length" "$final_time" \
-                            "$time_steps" "$threads"
-                        ((measurements += 1))
-                    done
-                    ((jobs += 1))
-                    ((total_slots += threads))
-                fi
-            done
-        done
-    done
-    printf 'planned_configurations=36\nplanned_jobs=%d\nplanned_measurements=%d\nplanned_total_requested_slots=%d\n' \
-        "$jobs" "$measurements" "$total_slots"
-    ((jobs == 60 && measurements == 108 && total_slots == 510)) ||
-        fail "internal matrix error: planned $jobs jobs, $measurements measurements, and $total_slots slots"
-    printf 'note=dry-run did not call bsub or create campaign data\n'
-}
-
-if [[ "$dry_run" == TRUE ]]; then
-    print_plan
+if [[ "$mode" == submit ]]; then
+    campaign_dir=$(cd -- "$submit_campaign" && pwd -P) || fail 'campaign not found'
+    submissions=$campaign_dir/submissions.csv
+    [[ -r "$submissions" ]] || fail 'missing submission record'
+    command -v bsub >/dev/null || fail 'bsub unavailable'
+    # Prevent simultaneous operators selecting the same batch. Never remove a stale guard automatically.
+    guard=$campaign_dir/.submitting
+    mkdir "$guard" 2>/dev/null || fail 'submission guard exists; check active submitters before manual removal'
+    trap 'rmdir "$guard"' EXIT
+    eligible=$("$python_executable" - "$campaign_dir" <<'PYTHON'
+import csv, sys
+from pathlib import Path
+campaign = Path(sys.argv[1])
+with (campaign/'submissions.csv').open(newline='') as f:
+    events = list(csv.DictReader(f))
+states = {}
+for row in events:
+    group, event = row['job_group'], row['event']
+    if event not in ('submitting', 'accepted', 'failed'):
+        sys.exit('Unknown submission event; reconcile manually')
+    if event == 'accepted' and not row['lsf_job_id'].isdigit():
+        sys.exit('Invalid accepted job ID; reconcile manually')
+    if event == 'submitting':
+        if group in states:
+            sys.exit('Repeated submission attempt; reconcile manually')
+    elif states.get(group) != 'submitting':
+        sys.exit('Malformed submission history; reconcile manually')
+    states[group] = event
+if any(state != 'accepted' for state in states.values()):
+    sys.exit('Failed/interrupted/uncertain submission: reconcile bjobs/bhist and submissions.csv before continuing; never retry uncertain acceptance')
+with (campaign/'manifest.csv').open(newline='') as f:
+    rows = list(csv.DictReader(f))
+if len(rows) != 360 or len({r['job_group'] for r in rows}) != 360:
+    sys.exit('Expected a prepared 360-job campaign')
+if set(states) - {r['job_group'] for r in rows}:
+    sys.exit('Unknown submitted group; reconcile manually')
+for row in rows:
+    if row['job_group'] not in states:
+        print(row['job_group'], row['job_name'], row['requested_threads'])
+PYTHON
+    ) || fail 'cannot select a safe batch'
+    jobs=0
+    slots=0
+    while read -r group name threads; do
+        [[ -n "$group" ]] || continue
+        [[ "$group" =~ ^n[0-9]+_l(pi|1)_t[0-9]+_r[0-9]+$ && "$threads" =~ ^[0-9]+$ ]] || fail 'invalid manifest'
+        ((jobs < 12 && slots + threads <= 120)) || break
+        job=$campaign_dir/jobs/$group.lsf
+        [[ -r "$job" ]] || fail "missing $job"
+        printf '%s,submitting,%s,%s,%s,,calling bsub\n' "$(date -u +%FT%TZ)" "$group" "$name" "$(csv_text "$job")" >> "$submissions" || fail 'cannot record intent'
+        if output=$(bsub < "$job" 2>&1); then
+            job_id=$(awk 'match($0, /<[0-9]+>/) {print substr($0,RSTART+1,RLENGTH-2); exit}' <<< "$output")
+            [[ "$job_id" =~ ^[0-9]+$ ]] || fail "uncertain acceptance: $output; reconcile manually"
+            printf '%s,accepted,%s,%s,%s,%s,%s\n' "$(date -u +%FT%TZ)" "$group" "$name" "$(csv_text "$job")" "$job_id" "$(csv_text "$output")" >> "$submissions" || fail "accepted job $job_id could not be recorded"
+        else
+            printf '%s,failed,%s,%s,%s,,%s\n' "$(date -u +%FT%TZ)" "$group" "$name" "$(csv_text "$job")" "$(csv_text "$output")" >> "$submissions"
+            fail "bsub failed: $output; no retry performed"
+        fi
+        ((jobs += 1))
+        ((slots += threads))
+        printf 'submitted: group=%s job_id=%s slots=%s\n' "$group" "$job_id" "$threads"
+    done <<< "$eligible"
+    printf 'batch_jobs=%d batch_requested_slots=%d; inspect bjobs before next batch\n' "$jobs" "$slots"
     exit 0
 fi
 
+plan=$("$python_executable" - "$random_seed" <<'PYTHON'
+import random, sys
+configurations = [(n, domain, threads) for n in (128,256,512)
+                  for domain in ('l1','lpi') for threads in (1,2,4,8,16,20)]
+for repetition in range(1,11):
+    ordered = list(configurations)
+    random.Random(int(sys.argv[1]) + repetition).shuffle(ordered)
+    for n, domain, threads in ordered:
+        print(n, domain, threads, repetition)
+PYTHON
+) || fail 'cannot generate plan'
+
+if [[ "$dry_run" == TRUE ]]; then
+    printf 'random_seed=%s round_seed=random_seed+round\n' "$random_seed"
+    while read -r n domain_id threads repetition; do
+        length=$(domain_length "$domain_id")
+        read -r dt final_time cfl_squared <<< "$(time_parameters "$n" "$length" "$length" "$length")"
+        printf 'job: group=n%s_%s_t%s_r%s round=%s N=%s L=%s threads=%s slots=%s queue=%s walltime=%s host=%s exclusive=yes span_hosts=1 dt=%s T=%s cfl_squared=%s\n' "$n" "$domain_id" "$threads" "$repetition" "$repetition" "$n" "$length" "$threads" "$threads" "$POLUS_FULL_V1_QUEUE" "$POLUS_FULL_V1_WALLTIME" "$POLUS_FULL_V1_HOST" "$dt" "$final_time" "$cfl_squared"
+        printf '  measurement: wave_solver --n %s --lx %s --ly %s --lz %s --time %s --steps 20 --threads %s\n' "$n" "$length" "$length" "$length" "$final_time" "$threads"
+    done <<< "$plan"
+    printf 'planned_configurations=36\nplanned_rounds=10\nplanned_jobs=360\nplanned_measurements=360\nplanned_total_requested_slots=3060\n'
+    exit 0
+fi
 solver_source=$repo_root/build/wave_solver
 [[ -x "$solver_source" ]] ||
     fail "$solver_source is missing or not executable; run ./setup.sh first"
-command -v bsub >/dev/null 2>&1 || fail 'bsub is unavailable'
+
 
 campaign_root=$repo_root/results/polus/full_v1
 mkdir -p "$campaign_root" || fail "cannot create campaign root: $campaign_root"
@@ -209,19 +240,25 @@ conda_environment=$POLUS_CONDA_ENV
 queue=$POLUS_FULL_V1_QUEUE
 walltime=$POLUS_FULL_V1_WALLTIME
 required_host=$POLUS_FULL_V1_HOST
-manifest_schema_version=2
-benchmark_policy=cfl_scaled_fixed_steps_v1
+manifest_schema_version=3
+benchmark_policy=cfl_scaled_rounds_v1
 time_steps=$time_steps
 cfl_fraction=$cfl_fraction
 cfl_squared=0.25
 expected_configurations=36
-expected_jobs=60
-expected_measurements=108
+expected_jobs=360
+expected_measurements=360
+repetitions=10
+random_seed=$random_seed
+round_seed_rule=random_seed+round
+submission_order=manifest.csv row order
+python_executable=$python_executable
+python_version=$("$python_executable" --version 2>&1)
 EOF
 
 manifest=$campaign_dir/manifest.csv
 submissions=$campaign_dir/submissions.csv
-printf '%s\n' 'measurement_id,n,domain_id,lx,ly,lz,physical_final_time,time_steps,time_step,cfl_fraction,cfl_squared,requested_threads,repetition,job_group,job_name' >"$manifest" ||
+printf '%s\n' 'measurement_id,n,domain_id,lx,ly,lz,physical_final_time,time_steps,time_step,cfl_fraction,cfl_squared,requested_threads,repetition,job_group,job_name,round' >"$manifest" ||
     fail 'cannot create the campaign manifest'
 printf '%s\n' 'timestamp_utc,event,job_group,job_name,job_script,lsf_job_id,details' >"$submissions" ||
     fail 'cannot create the submission record'
@@ -306,10 +343,6 @@ fi
 
 job_id=\${LSB_JOBID:-}
 [[ "\$job_id" =~ ^[0-9]+$ ]] || fail 'numeric LSB_JOBID is required'
-if [[ -n "\${LSB_DJOB_NUMPROC:-}" ]]; then
-    [[ "\$LSB_DJOB_NUMPROC" =~ ^[0-9]+$ ]] || fail 'invalid LSF slot count'
-    ((LSB_DJOB_NUMPROC == requested_threads)) || fail 'LSF slot count does not match requested threads'
-fi
 host_name=\$(hostname 2>/dev/null || uname -n)
 host_fqdn=\$(hostname -f 2>/dev/null || printf 'unavailable')
 printf 'campaign=%s\njob_id=%s\njob_group=%s\nhostname=%s\nhostname_fqdn=%s\nLSB_HOSTS=%s\n' \
@@ -320,8 +353,7 @@ export OMP_DYNAMIC=FALSE
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 
-job_status=0
-for repetition in $repetition_words; do
+repetition=$repetition_words
     measurement_id=n${n}_${domain_id}_t${threads}_r\${repetition}
     stem=\$measurements_dir/\${measurement_id}.job\${job_id}
     stdout_file=\${stem}.stdout
@@ -329,8 +361,7 @@ for repetition in $repetition_words; do
     metadata_file=\${stem}.meta
     if [[ -e "\$stdout_file" || -e "\$stderr_file" || -e "\$metadata_file" ]]; then
         printf 'measurement files already exist for %s; refusing to overwrite\n' "\$measurement_id" >&2
-        job_status=1
-        continue
+        exit 1
     fi
 
     started_at=\$(date -u '+%Y-%m-%dT%H:%M:%SZ')
@@ -346,6 +377,7 @@ for repetition in $repetition_words; do
     if ! (
         set -o noclobber
         {
+            printf 'round=%s\nconfiguration_id=n${n}_${domain_id}_t${threads}\n' "\$repetition"
             printf 'measurement_id=%s\n' "\$measurement_id"
             printf 'job_group=%s\njob_id=%s\n' "\$job_group" "\$job_id"
             printf 'hostname=%s\nhostname_fqdn=%s\nLSB_HOSTS=%s\n' \
@@ -361,26 +393,22 @@ for repetition in $repetition_words; do
         } >"\$metadata_file"
     ); then
         printf 'could not publish metadata for %s\n' "\$measurement_id" >&2
-        job_status=1
-        continue
+        exit 1
     fi
 
     printf 'measurement=%s solver_exit_code=%d stdout=%s stderr=%s\n' \
         "\$measurement_id" "\$solver_status" "\$stdout_file" "\$stderr_file"
-    ((solver_status == 0)) || job_status=1
-done
-
-exit "\$job_status"
+exit "\$solver_status"
 EOF
     chmod 755 "$job_file" || fail "cannot make generated job executable: $job_file"
 
     IFS=, read -r -a repetition_values <<<"$repetitions"
     for repetition in "${repetition_values[@]}"; do
         measurement_id=n${n}_${domain_id}_t${threads}_r${repetition}
-        printf '%s,%d,%s,%s,%s,%s,%s,%d,%s,%s,%s,%d,%d,%s,%s\n' \
+        printf '%s,%d,%s,%s,%s,%s,%s,%d,%s,%s,%s,%d,%d,%s,%s,%d\n' \
             "$measurement_id" "$n" "$domain_id" "$length" "$length" "$length" \
             "$final_time" "$time_steps" "$dt" "$cfl_fraction" "$cfl_squared" \
-            "$threads" "$repetition" "$group" "$job_name" >>"$manifest" ||
+            "$threads" "$repetition" "$group" "$job_name" "$repetition" >>"$manifest" ||
             fail 'cannot append to the campaign manifest'
         ((manifest_rows += 1))
     done
@@ -390,97 +418,15 @@ EOF
     ((job_slots += threads))
 }
 
+
 campaign_tag=${campaign_id//[-_]/}
-for n in "${grid_sizes[@]}"; do
-    for domain_id in "${domain_ids[@]}"; do
-        length=$(domain_length "$domain_id") || fail "unknown domain: $domain_id"
-        read -r dt final_time cfl_squared <<<"$(time_parameters "$n" "$length" "$length" "$length")" ||
-            fail "could not calculate time parameters for N=$n, L=$length"
-        for threads in "${thread_counts[@]}"; do
-            if ((n == 512)); then
-                for repetition in 1 2 3; do
-                    group=n${n}_${domain_id}_t${threads}_r${repetition}
-                    job_name=v1_${campaign_tag}_${group}
-                    generate_job "$n" "$domain_id" "$length" "$dt" "$final_time" \
-                        "$cfl_squared" "$threads" "$repetition" "$group" "$job_name"
-                done
-            else
-                group=n${n}_${domain_id}_t${threads}_r123
-                job_name=v1_${campaign_tag}_${group}
-                generate_job "$n" "$domain_id" "$length" "$dt" "$final_time" \
-                    "$cfl_squared" "$threads" '1,2,3' "$group" "$job_name"
-            fi
-        done
-    done
-done
-
-((manifest_rows == 108)) || fail "manifest contains $manifest_rows measurements instead of 108"
-((${#job_files[@]} == 60)) || fail "generated ${#job_files[@]} jobs instead of 60"
-((job_slots == 510)) || fail "generated jobs request $job_slots total slots instead of 510"
-printf 'submission_plan: jobs=%d measurements=%d total_requested_slots=%d queue=%s walltime=%s\n' \
-    "${#job_files[@]}" "$manifest_rows" "$job_slots" \
-    "$POLUS_FULL_V1_QUEUE" "$POLUS_FULL_V1_WALLTIME"
-
-current_group=''
-current_name=''
-current_script=''
-submission_in_progress=FALSE
-record_submission_event() {
-    local event=$1 job_id=$2 details=$3
-    if ! printf '%s,%s,%s,%s,%s,%s,%s\n' \
-        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$event" "$current_group" \
-        "$current_name" "$(csv_text "$current_script")" "$job_id" \
-        "$(csv_text "$details")" \
-        >>"$submissions"; then
-        printf 'cannot append submission event %s to %s\n' "$event" "$submissions" >&2
-        return 1
-    fi
-}
-on_interrupt() {
-    if [[ "$submission_in_progress" == TRUE ]]; then
-        record_submission_event interrupted '' \
-            'submission script interrupted; inspect bjobs before any manual rerun' || true
-    fi
-    printf 'submission interrupted; campaign preserved at %s\n' "$campaign_dir" >&2
-    exit 130
-}
-trap on_interrupt HUP INT TERM
-
-accepted_jobs=0
-for index in "${!job_files[@]}"; do
-    current_script=${job_files[$index]}
-    current_group=${job_groups[$index]}
-    current_name=${job_names[$index]}
-    submission_in_progress=TRUE
-    record_submission_event submitting '' 'calling bsub' ||
-        fail "cannot record submission attempt for $current_group"
-
-    if submission_output=$(bsub <"$current_script" 2>&1); then
-        submission_status=0
-    else
-        submission_status=$?
-    fi
-    if ((submission_status != 0)); then
-        record_submission_event failed '' "bsub exit $submission_status: $submission_output" || true
-        submission_in_progress=FALSE
-        printf '%s\n' "$submission_output" >&2
-        fail "submission failed for $current_group; campaign preserved at $campaign_dir"
-    fi
-
-    job_id=$(awk 'match($0, /<[0-9]+>/) { print substr($0, RSTART + 1, RLENGTH - 2); exit }' <<<"$submission_output")
-    if [[ ! "$job_id" =~ ^[0-9]+$ ]]; then
-        record_submission_event uncertain '' \
-            "bsub succeeded but its job ID was not understood: $submission_output" || true
-        submission_in_progress=FALSE
-        fail "uncertain submission for $current_group; inspect bjobs and $submissions"
-    fi
-    record_submission_event accepted "$job_id" "$submission_output" ||
-        fail "job $job_id was accepted but could not be recorded; inspect bjobs"
-    submission_in_progress=FALSE
-    ((accepted_jobs += 1))
-    printf 'submitted: group=%s job_id=%s script=%s\n' "$current_group" "$job_id" "$current_script"
-done
-
-printf 'campaign_directory=%s\n' "$campaign_dir"
-printf 'manifest_measurements=%d\nsubmitted_jobs=%d\n' "$manifest_rows" "$accepted_jobs"
-printf 'monitor_command=bjobs\n'
+while read -r n domain_id threads repetition; do
+    length=$(domain_length "$domain_id") || fail 'unknown domain'
+    read -r dt final_time cfl_squared <<< "$(time_parameters "$n" "$length" "$length" "$length")"
+    group=n${n}_${domain_id}_t${threads}_r${repetition}
+    job_name=v1_${campaign_tag}_${group}
+    generate_job "$n" "$domain_id" "$length" "$dt" "$final_time" "$cfl_squared" "$threads" "$repetition" "$group" "$job_name"
+done <<< "$plan"
+((manifest_rows == 360 && ${#job_files[@]} == 360 && job_slots == 3060)) || fail 'internal matrix error'
+printf 'campaign_directory=%s\nprepared_jobs=360 measurements=360 total_requested_slots=3060\n' "$campaign_dir"
+printf 'No jobs submitted. Next: bash scripts/polus/submit_full_v1.sh --submit-next %q\n' "$campaign_dir"

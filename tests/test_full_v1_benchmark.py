@@ -61,15 +61,16 @@ def build_synthetic_campaign(root: Path, policy: str) -> Path:
 
     metadata: dict[str, object] = {"binary_sha256": checksum}
     fields = analyzer.LEGACY_MANIFEST_FIELDS
-    if policy == analyzer.NEW_POLICY:
-        fields = analyzer.MANIFEST_FIELDS
+    if policy in (analyzer.NEW_POLICY, analyzer.ROUND_POLICY):
+        fields = analyzer.ROUND_MANIFEST_FIELDS if policy == analyzer.ROUND_POLICY else analyzer.MANIFEST_FIELDS
         metadata.update(
             {
-                "manifest_schema_version": 2,
-                "benchmark_policy": analyzer.NEW_POLICY,
+                "manifest_schema_version": 3 if policy == analyzer.ROUND_POLICY else 2,
+                "benchmark_policy": policy,
                 "time_steps": 20,
                 "cfl_fraction": 0.5,
                 "cfl_squared": 0.25,
+                "repetitions": 10 if policy == analyzer.ROUND_POLICY else 3,
             }
         )
     write_key_values(root / "metadata.txt", metadata)
@@ -97,7 +98,7 @@ def build_synthetic_campaign(root: Path, policy: str) -> Path:
             "job_group": row["job_group"],
             "job_name": job_names[str(row["job_group"])],
         }
-        if policy == analyzer.NEW_POLICY:
+        if policy in (analyzer.NEW_POLICY, analyzer.ROUND_POLICY):
             manifest_row.update(
                 {
                     "time_step": format(float(row["time_step"]), ".17g"),
@@ -105,6 +106,8 @@ def build_synthetic_campaign(root: Path, policy: str) -> Path:
                     "cfl_squared": format(float(row["cfl_squared"]), ".17g"),
                 }
             )
+        if policy == analyzer.ROUND_POLICY:
+            manifest_row["round"] = row["repetition"]
         manifest_rows.append(manifest_row)
 
     with (root / "manifest.csv").open("w", newline="", encoding="utf-8") as handle:
@@ -154,7 +157,7 @@ def build_synthetic_campaign(root: Path, policy: str) -> Path:
             "completed_at_utc": "2026-10-22T00:00:01Z",
             "solver_exit_code": 0,
         }
-        if policy == analyzer.NEW_POLICY:
+        if policy in (analyzer.NEW_POLICY, analyzer.ROUND_POLICY):
             meta.update(
                 {
                     "time_step": row["time_step"],
@@ -162,9 +165,12 @@ def build_synthetic_campaign(root: Path, policy: str) -> Path:
                     "cfl_squared": row["cfl_squared"],
                 }
             )
+        if policy == analyzer.ROUND_POLICY:
+            meta["round"] = row["repetition"]
+            meta["configuration_id"] = measurement_id.rsplit("_r", 1)[0]
         write_key_values(Path(f"{stem}.meta"), meta)
 
-        repetition_factor = (0.98, 1.0, 1.02)[int(row["repetition"]) - 1]
+        repetition_factor = (1.0 + (int(row["repetition"]) - (5.5 if policy == analyzer.ROUND_POLICY else 2)) * 0.02)
         solve_time = (
             0.01
             * (int(row["n"]) / 128) ** 3
@@ -247,13 +253,24 @@ class BenchmarkTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            again = subprocess.run(["bash", str(SUBMITTER_PATH), "--dry-run"], env=environment, text=True, capture_output=True, check=True)
+            self.assertEqual(completed.stdout, again.stdout)
+            plans = [line for line in completed.stdout.splitlines() if line.startswith("job:")]
+            rounds = {}
+            for line in plans:
+                identity = re.search(r"group=(\S+)", line).group(1)
+                config, repetition = identity.rsplit("_r", 1)
+                rounds.setdefault(int(repetition), []).append(config)
+            self.assertEqual(set(rounds), set(range(1, 11)))
+            self.assertTrue(all(len(set(values)) == 36 for values in rounds.values()))
+            self.assertEqual(len({tuple(v) for v in rounds.values()}), 10)
             self.assertFalse(marker.exists())
-            self.assertEqual(completed.stdout.count("\njob:"), 60)
-            self.assertEqual(completed.stdout.count("\n  measurement:"), 108)
+            self.assertEqual(completed.stdout.count("\njob:"), 360)
+            self.assertEqual(completed.stdout.count("\n  measurement:"), 360)
             self.assertIn("planned_configurations=36", completed.stdout)
-            self.assertIn("planned_jobs=60", completed.stdout)
-            self.assertIn("planned_measurements=108", completed.stdout)
-            self.assertIn("planned_total_requested_slots=510", completed.stdout)
+            self.assertIn("planned_jobs=360", completed.stdout)
+            self.assertIn("planned_measurements=360", completed.stdout)
+            self.assertIn("planned_total_requested_slots=3060", completed.stdout)
             self.assertIn("queue=short", completed.stdout)
             self.assertIn("walltime=00:10", completed.stdout)
             self.assertNotIn("queue=normal", completed.stdout)
@@ -308,7 +325,7 @@ class BenchmarkTests(unittest.TestCase):
             (fake_repo / "Makefile").write_text("all:\n\t@true\n", encoding="utf-8")
             (fake_repo / "SPEC.md").write_text("synthetic\n", encoding="utf-8")
             solver = fake_repo / "build" / "wave_solver"
-            solver.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            solver.write_text('#!/bin/sh\nprintf "mock solver output\\n"\nexit "${TEST_SOLVER_EXIT:-0}"\n', encoding="utf-8")
             solver.chmod(0o755)
             bin_dir = Path(temporary) / "bin"
             bin_dir.mkdir()
@@ -329,7 +346,7 @@ class BenchmarkTests(unittest.TestCase):
             environment["PATH"] = f"{bin_dir}:{environment['PATH']}"
             for _ in range(2):
                 completed = subprocess.run(
-                    ["bash", "scripts/polus/submit_full_v1.sh"],
+                    ["bash", "scripts/polus/submit_full_v1.sh", "--prepare"],
                     cwd=fake_repo,
                     env=environment,
                     text=True,
@@ -339,8 +356,7 @@ class BenchmarkTests(unittest.TestCase):
                 )
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 self.assertIn(
-                    "submission_plan: jobs=60 measurements=108 "
-                    "total_requested_slots=510 queue=short walltime=00:10",
+                    "prepared_jobs=360 measurements=360 total_requested_slots=3060",
                     completed.stdout,
                 )
 
@@ -349,10 +365,10 @@ class BenchmarkTests(unittest.TestCase):
             self.assertNotEqual(campaigns[0], campaigns[1])
             campaign = campaigns[0]
             jobs = sorted((campaign / "jobs").glob("*.lsf"))
-            self.assertEqual(len(jobs), 60)
+            self.assertEqual(len(jobs), 360)
             with (campaign / "manifest.csv").open(newline="", encoding="utf-8") as handle:
                 manifest = list(csv.DictReader(handle))
-            self.assertEqual(len(manifest), 108)
+            self.assertEqual(len(manifest), 360)
             self.assertTrue(all(row["time_steps"] == "20" for row in manifest))
             metadata = analyzer.read_key_values(campaign / "metadata.txt")
             self.assertEqual(metadata["queue"], "short")
@@ -369,7 +385,7 @@ class BenchmarkTests(unittest.TestCase):
                 text = job.read_text(encoding="utf-8")
                 group = job.stem
                 job_rows = [row for row in manifest if row["job_group"] == group]
-                self.assertIn(len(job_rows), (1, 3))
+                self.assertEqual(len(job_rows), 1)
                 threads = int(re.search(r"_t(1|2|4|8|16|20)_", job.name).group(1))
                 self.assertIn(f"#BSUB -n {threads}\n", text)
                 self.assertIn("#BSUB -W 00:10\n", text)
@@ -380,12 +396,124 @@ class BenchmarkTests(unittest.TestCase):
                 self.assertIn("#BSUB -m polus-c4-ib.bmc.hpc.cs.msu.ru\n", text)
                 self.assertIn(f"solver={campaign.resolve()}/wave_solver\n", text)
                 self.assertNotIn("/build/wave_solver", text)
+                self.assertEqual(text.count('LC_ALL=C "$solver"'), 1)
+                self.assertNotIn("for repetition", text)
                 self.assertIn("--steps 20", text)
                 self.assertNotIn("--time 1 --steps", text)
                 self.assertIn(
                     f"--time {job_rows[0]['physical_final_time']} --steps 20",
                     text,
                 )
+
+            # Exclusive allocations can advertise 20 slots even for a smaller
+            # OpenMP team; that allocation metadata must not reject the job.
+            conda_root = Path(temporary) / "conda"
+            (conda_root / "etc/profile.d").mkdir(parents=True)
+            (conda_root / "lib").mkdir()
+            (conda_root / "etc/profile.d/conda.sh").write_text(
+                f'conda() {{ export CONDA_PREFIX="{conda_root}"; }}\n'
+            )
+            with (campaign / "config.sh").open("a") as f:
+                f.write(f'\nPOLUS_CONDA_BASE="{conda_root}"\n')
+            subprocess.run(["bash", str(jobs[0])], check=True, capture_output=True,
+                           env=dict(environment, LSB_JOBID="999", LSB_DJOB_NUMPROC="20", LSB_HOSTS="polus-c4"))
+            self.assertEqual(len(list((campaign / "measurements").glob("*.meta"))), 1)
+            failed_solver = subprocess.run(["bash", str(jobs[1])], capture_output=True,
+                env=dict(environment, LSB_JOBID="998", LSB_DJOB_NUMPROC="20", TEST_SOLVER_EXIT="7"))
+            self.assertEqual(failed_solver.returncode, 7)
+            failure_meta = next((campaign / "measurements").glob("*.job998.meta"))
+            self.assertIn("solver_exit_code=7", failure_meta.read_text())
+            self.assertTrue(failure_meta.with_suffix(".stdout").is_file())
+            self.assertTrue(failure_meta.with_suffix(".stderr").is_file())
+
+            # Preparation never invokes bsub. Two explicit batches must be bounded
+            # and must select different jobs in manifest order.
+            self.assertEqual(counter.read_text().strip(), "200000")
+            submit_next = ["bash", "scripts/polus/submit_full_v1.sh", "--submit-next", str(campaign)]
+            accepted_before = set()
+            offset = 0
+            for _ in range(2):
+                completed = subprocess.run(submit_next, cwd=fake_repo, env=environment,
+                                           text=True, capture_output=True)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                with (campaign / "submissions.csv").open(newline="") as f:
+                    accepted = [r for r in csv.DictReader(f) if r["event"] == "accepted"]
+                groups = [r["job_group"] for r in accepted]
+                self.assertEqual(len(groups), len(set(groups)))
+                batch = [r for r in accepted if r["job_group"] not in accepted_before]
+                self.assertTrue(0 < len(batch) <= 12)
+                slots = {r["job_group"]: int(r["requested_threads"]) for r in manifest}
+                self.assertLessEqual(sum(slots[r["job_group"]] for r in batch), 120)
+                self.assertEqual([r["job_group"] for r in batch],
+                                 [r["job_group"] for r in manifest[offset:offset+len(batch)]])
+                if len(batch) < 12:
+                    self.assertGreater(sum(slots[r["job_group"]] for r in batch) +
+                                       int(manifest[offset+len(batch)]["requested_threads"]), 120)
+                offset += len(batch)
+                accepted_before = set(groups)
+
+            # An intent without an acceptance survives interruption and blocks
+            # further calls, even if LSF accepted the job before the interruption.
+            row = manifest[offset]
+            with (campaign / "submissions.csv").open("a", newline="") as f:
+                csv.writer(f).writerow(["now", "submitting", row["job_group"], row["job_name"], "job", "", "injected interruption"])
+            count_before = counter.read_text()
+            completed = subprocess.run(submit_next, cwd=fake_repo, env=environment,
+                                       text=True, capture_output=True)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("reconcile", completed.stderr)
+            self.assertEqual(counter.read_text(), count_before)
+
+            # A failed bsub stops immediately and cannot be retried automatically.
+            bsub.write_text("#!/bin/sh\ncat >/dev/null\necho injected-failure >&2\nexit 1\n")
+            failed_command = submit_next[:-1] + [str(campaigns[1])]
+            completed = subprocess.run(failed_command, cwd=fake_repo, env=environment,
+                                       text=True, capture_output=True)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("bsub failed", completed.stderr)
+            self.assertIn(",failed,", (campaigns[1] / "submissions.csv").read_text())
+            completed = subprocess.run(failed_command, cwd=fake_repo, env=environment,
+                                       text=True, capture_output=True)
+            self.assertIn("reconcile", completed.stderr)
+            # Model successful bsub with an unparseable response. Leave intent
+            # recorded, and block the next invocation rather than guess.
+            record = campaigns[1] / "submissions.csv"
+            record.write_text(record.read_text().splitlines()[0] + "\n")
+            bsub.write_text("#!/bin/sh\ncat >/dev/null\necho 'accepted but ID unavailable'\n")
+            completed = subprocess.run(failed_command, cwd=fake_repo, env=environment,
+                                       text=True, capture_output=True)
+            self.assertIn("uncertain acceptance", completed.stderr)
+            completed = subprocess.run(failed_command, cwd=fake_repo, env=environment,
+                                       text=True, capture_output=True)
+            self.assertIn("reconcile", completed.stderr)
+
+    def test_round_synthetic_campaign(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            campaign = build_synthetic_campaign(Path(temporary) / "rounds", analyzer.ROUND_POLICY)
+            result = self.run_analyzer(campaign)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            with (campaign / "analysis/summary.csv").open(newline="") as f:
+                rows = list(csv.DictReader(f))
+            self.assertTrue(all(row["valid_repetitions"] == "10" for row in rows))
+            row = next(r for r in rows if r["n"] == "128" and r["domain_id"] == "l1" and r["requested_threads"] == "4")
+            self.assertAlmostEqual(float(row["speedup"]), 4)
+            self.assertAlmostEqual(float(row["parallel_efficiency"]), 1)
+            import statistics
+            factors = [1 + (r - 5.5) * .02 for r in range(1,11)]
+            self.assertAlmostEqual(float(row["coefficient_of_variation"]), statistics.stdev(factors))
+            output = next((campaign / "measurements").glob("*r10.job*.meta"))
+            saved = output.read_bytes()
+            duplicate = output.with_name(output.name.replace(".job", ".job9"))
+            duplicate.write_bytes(saved)
+            self.assertNotEqual(self.run_analyzer(campaign).returncode, 0)
+            duplicate.unlink()
+            output.unlink()
+            self.assertNotEqual(self.run_analyzer(campaign).returncode, 0)
+            output.write_bytes(saved)
+            meta = analyzer.read_key_values(output)
+            meta["round"] = "9"
+            write_key_values(output, meta)
+            self.assertNotEqual(self.run_analyzer(campaign).returncode, 0)
 
     def test_manifest_rejects_wrong_problem_parameters(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

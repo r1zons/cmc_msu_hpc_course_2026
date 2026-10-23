@@ -19,6 +19,7 @@ GRID_SIZES = (128, 256, 512)
 DOMAIN_LENGTHS = {"l1": 1.0, "lpi": math.pi}
 THREAD_COUNTS = (1, 2, 4, 8, 16, 20)
 REPETITIONS = (1, 2, 3)
+ROUND_POLICY = "cfl_scaled_rounds_v1"
 NEW_TIME_STEPS = 20
 NEW_CFL_FRACTION = 0.5
 NEW_POLICY = "cfl_scaled_fixed_steps_v1"
@@ -57,6 +58,7 @@ MANIFEST_FIELDS = (
     "job_group",
     "job_name",
 )
+ROUND_MANIFEST_FIELDS = MANIFEST_FIELDS + ("round",)
 SUBMISSION_FIELDS = (
     "timestamp_utc",
     "event",
@@ -82,6 +84,7 @@ SUMMARY_FIELDS = (
     "maximum_seconds",
     "mean_seconds",
     "standard_deviation_seconds",
+    "coefficient_of_variation",
     "speedup",
     "parallel_efficiency",
     "median_max_absolute_error",
@@ -91,7 +94,7 @@ SUMMARY_FIELDS = (
 ISSUE_FIELDS = ("measurement_id", "category", "detail", "path")
 
 MEASUREMENT_FILE = re.compile(
-    r"^(n(?:128|256|512)_(?:l1|lpi)_t(?:1|2|4|8|16|20)_r[123])"
+    r"^(n(?:128|256|512)_(?:l1|lpi)_t(?:1|2|4|8|16|20)_r(?:[1-9]|10))"
     r"\.job([0-9]+)\.(meta|stdout|stderr)$"
 )
 
@@ -121,7 +124,7 @@ def expected_matrix(policy: str) -> dict[str, dict[str, Any]]:
     expected: dict[str, dict[str, Any]] = {}
     for n in GRID_SIZES:
         for domain_id, length in DOMAIN_LENGTHS.items():
-            if policy == NEW_POLICY:
+            if policy in (NEW_POLICY, ROUND_POLICY):
                 steps = NEW_TIME_STEPS
                 time_step, final_time, cfl_squared = time_parameters(
                     n, length, length, length, steps, NEW_CFL_FRACTION
@@ -137,9 +140,9 @@ def expected_matrix(policy: str) -> dict[str, dict[str, Any]]:
             else:
                 raise ValueError(f"unsupported benchmark policy: {policy!r}")
             for threads in THREAD_COUNTS:
-                for repetition in REPETITIONS:
+                for repetition in (range(1, 11) if policy == ROUND_POLICY else REPETITIONS):
                     measurement_id = f"n{n}_{domain_id}_t{threads}_r{repetition}"
-                    if n == 512:
+                    if n == 512 or policy == ROUND_POLICY:
                         job_group = measurement_id
                     else:
                         job_group = f"n{n}_{domain_id}_t{threads}_r123"
@@ -197,7 +200,7 @@ def read_manifest(path: Path) -> tuple[list[dict[str, str]], tuple[str, ...]]:
     with path.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         fields = tuple(reader.fieldnames or ())
-        if fields not in (MANIFEST_FIELDS, LEGACY_MANIFEST_FIELDS):
+        if fields not in (MANIFEST_FIELDS, LEGACY_MANIFEST_FIELDS, ROUND_MANIFEST_FIELDS):
             raise ValueError(
                 "unexpected manifest header: "
                 f"{reader.fieldnames!r}; expected current or historical schema"
@@ -232,11 +235,13 @@ def campaign_policy(
         if manifest_fields != LEGACY_MANIFEST_FIELDS:
             raise ValueError("campaign metadata does not identify the manifest policy")
         return LEGACY_POLICY
-    if policy not in (NEW_POLICY, LEGACY_POLICY):
+    if policy not in (NEW_POLICY, LEGACY_POLICY, ROUND_POLICY):
         raise ValueError(f"unsupported benchmark_policy: {policy!r}")
-    if policy == NEW_POLICY:
-        if metadata.get("manifest_schema_version") != "2":
-            raise ValueError("CFL-scaled campaign metadata requires schema version 2")
+    if policy in (NEW_POLICY, ROUND_POLICY):
+        if metadata.get("manifest_schema_version") != ("3" if policy == ROUND_POLICY else "2"):
+            raise ValueError("CFL-scaled campaign metadata has an incompatible schema version")
+        if policy == ROUND_POLICY and metadata.get("repetitions") != "10":
+            raise ValueError("round campaign metadata requires ten repetitions")
         if parse_integer(metadata.get("time_steps", ""), "metadata time_steps") != NEW_TIME_STEPS:
             raise ValueError("campaign metadata time_steps does not match policy")
         if not close_enough(
@@ -314,6 +319,8 @@ def validate_manifest(
     issues: list[dict[str, str]],
     path: Path,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    if policy == ROUND_POLICY and fields != ROUND_MANIFEST_FIELDS:
+        raise ValueError("round campaign requires schema 3")
     if policy == NEW_POLICY and fields != MANIFEST_FIELDS:
         raise ValueError("the CFL-scaled policy requires manifest schema version 2")
     if policy == LEGACY_POLICY and fields != LEGACY_MANIFEST_FIELDS:
@@ -422,6 +429,8 @@ def validate_manifest(
             mismatch.append("cfl_fraction is inconsistent with dt and the spatial grid")
         if not close_enough(parsed["cfl_squared"], derived_squared):
             mismatch.append("cfl_squared is inconsistent with dt and the spatial grid")
+        if policy == ROUND_POLICY and row.get("round") != str(parsed["repetition"]):
+            mismatch.append("round does not match repetition")
         if not parsed["job_name"]:
             mismatch.append("job_name is empty")
         old_name = job_names.setdefault(parsed["job_group"], parsed["job_name"])
@@ -439,7 +448,7 @@ def validate_manifest(
         manifest[measurement_id] = {
             **expected,
             "job_name": parsed["job_name"],
-            "schema_version": 2 if fields == MANIFEST_FIELDS else 1,
+            "schema_version": 3 if fields == ROUND_MANIFEST_FIELDS else (2 if fields == MANIFEST_FIELDS else 1),
         }
 
     for measurement_id in sorted(canonical.keys() - manifest.keys()):
@@ -536,6 +545,12 @@ def validate_measurement(
     campaign_checksum: str,
 ) -> dict[str, Any]:
     metadata = read_key_values(metadata_path)
+    if manifest_row["schema_version"] == 3:
+        if metadata.get("round") != str(manifest_row["repetition"]):
+            raise ValueError("measurement round mismatch")
+        configuration = manifest_row["measurement_id"].rsplit("_r", 1)[0]
+        if metadata.get("configuration_id") != configuration:
+            raise ValueError("configuration_id mismatch")
     required_metadata = {
         "measurement_id",
         "job_group",
@@ -684,6 +699,11 @@ def validate_measurement(
         "error_tolerance": tolerance,
         "job_id": job_id_from_name,
         "metadata_path": metadata_path,
+        "hostname": metadata["hostname"],
+        "hostname_fqdn": metadata["hostname_fqdn"],
+        "LSB_HOSTS": metadata["LSB_HOSTS"],
+        "started_at_utc": metadata["started_at_utc"],
+        "completed_at_utc": metadata["completed_at_utc"],
     }
 
 
@@ -714,12 +734,12 @@ def make_summary(
                 configuration = canonical[f"n{n}_{domain_id}_t{threads}_r1"]
                 values = [
                     valid[f"n{n}_{domain_id}_t{threads}_r{repetition}"]
-                    for repetition in REPETITIONS
+                    for repetition in (range(1, 11) if policy == ROUND_POLICY else REPETITIONS)
                     if f"n{n}_{domain_id}_t{threads}_r{repetition}" in valid
                 ]
                 times = [item["time"] for item in values]
                 errors = [item["error"] for item in values]
-                complete = len(values) == 3
+                complete = len(values) == (10 if policy == ROUND_POLICY else 3)
                 median_time = statistics.median(times) if times else None
                 if complete:
                     complete_configurations += 1
@@ -759,6 +779,7 @@ def make_summary(
                         "standard_deviation_seconds": format_number(
                             statistics.stdev(times) if len(times) > 1 else None
                         ),
+                        "coefficient_of_variation": format_number(statistics.stdev(times) / statistics.mean(times) if len(times) > 1 and statistics.mean(times) > 0 else None),
                         "speedup": "",
                         "parallel_efficiency": "",
                         "median_max_absolute_error": format_number(
@@ -806,6 +827,7 @@ def generate_plots(
         "speedup.png",
         "parallel_efficiency.png",
         "numerical_error.png",
+        "timing_variability.png",
     )
     for name in plot_names:
         (analysis_dir / name).unlink(missing_ok=True)
@@ -836,6 +858,8 @@ def generate_plots(
                         marker="o",
                         label=f"N={n}, L={'1' if domain_id == 'l1' else 'pi'}",
                     )
+        if field == "speedup":
+            axis.plot(THREAD_COUNTS, THREAD_COUNTS, "--", label="Ideal scaling")
         axis.set_xlabel("OpenMP threads")
         axis.set_ylabel(ylabel)
         axis.grid(True, alpha=0.3)
@@ -850,6 +874,27 @@ def generate_plots(
         plot_metric(
             "parallel_efficiency", "Parallel efficiency", "parallel_efficiency.png"
         )
+
+        figure, axes = plt.subplots(3, 2, figsize=(12, 10))
+        for i, n in enumerate(GRID_SIZES):
+            for j, domain_id in enumerate(DOMAIN_LENGTHS):
+                ax = axes[i, j]
+                data, labels = [], []
+                for threads in THREAD_COUNTS:
+                    times = [v["time"] for key, v in valid.items()
+                             if key.startswith(f"n{n}_{domain_id}_t{threads}_r")]
+                    if times:
+                        data.append(times)
+                        labels.append(str(threads))
+                if data:
+                    ax.boxplot(data)
+                    ax.set_xticklabels(labels)
+                ax.set_title(f"N={n}, L={'1' if domain_id == 'l1' else 'pi'}")
+                ax.set_xlabel("Threads")
+                ax.set_ylabel("Solve seconds (all valid runs)")
+        figure.tight_layout()
+        figure.savefig(analysis_dir / "timing_variability.png", dpi=150)
+        plt.close(figure)
 
         figure, axis = plt.subplots()
         for domain_id, length in DOMAIN_LENGTHS.items():
@@ -888,7 +933,7 @@ def generate_plots(
             )
         axis.set_xlabel("N (intervals per axis)")
         axis.set_ylabel("Maximum absolute error")
-        if policy == NEW_POLICY:
+        if policy in (NEW_POLICY, ROUND_POLICY):
             axis.set_title("CFL-scaled fixed-20-step error (final time varies with N and L)")
         else:
             axis.set_title("Fixed-final-time numerical error")
@@ -902,7 +947,7 @@ def generate_plots(
         for name in plot_names:
             (analysis_dir / name).unlink(missing_ok=True)
         return f"plot generation failed ({error}); CSV analysis is still available"
-    return "four matplotlib plots generated"
+    return "five matplotlib plots generated"
 
 
 def main() -> int:
@@ -1053,12 +1098,17 @@ def main() -> int:
     write_csv(analysis_dir / "missing_or_failed.csv", ISSUE_FIELDS, issues)
     plot_status = generate_plots(analysis_dir, summaries, valid, policy)
 
+    write_csv(analysis_dir / "measurement_order.csv",
+              ("measurement_id", "job_id", "hostname", "hostname_fqdn", "LSB_HOSTS", "started_at_utc", "completed_at_utc", "time"),
+              [dict(measurement_id=key, **value) for key, value in sorted(valid.items())])
     expected_jobs = len({row["job_group"] for row in manifest.values()})
     accepted_jobs = sum(len(ids) for ids in accepted.values())
+    expected_count = len(expected_matrix(policy))
+    target_jobs = 360 if policy == ROUND_POLICY else 60
     complete = (
-        len(manifest) == 108
-        and expected_jobs == 60
-        and len(valid) == 108
+        len(manifest) == expected_count
+        and expected_jobs == target_jobs
+        and len(valid) == expected_count
         and complete_configurations == 36
         and not issues
     )
@@ -1067,7 +1117,7 @@ def main() -> int:
         "V1 OpenMP campaign analysis",
         f"Campaign: {campaign}",
         f"Benchmark policy: {policy}",
-        f"Expected measurements: 108",
+        f"Expected measurements: {expected_count}",
         f"Manifest measurements validated: {len(manifest)}",
         f"Expected LSF jobs represented by manifest: {expected_jobs}",
         f"Accepted LSF jobs recorded: {accepted_jobs}",
@@ -1078,9 +1128,14 @@ def main() -> int:
             "Interpretation: CFL-scaled fixed-20-step benchmark; physical final "
             "time varies with N and L, so the error curve is not a fixed-time "
             "convergence-order experiment."
-            if policy == NEW_POLICY
+            if policy in (NEW_POLICY, ROUND_POLICY)
             else "Interpretation: historical fixed-final-time campaign."
         ),
+        "Recorded hostname spellings: " + str(sorted({r["hostname"] for r in valid.values()})),
+        "Recorded FQDN spellings: " + str(sorted({r["hostname_fqdn"] for r in valid.values()})),
+        "Recorded LSB_HOSTS: " + str(sorted({r["LSB_HOSTS"] for r in valid.values()})),
+        "Host records are diagnostics; aliases and physical identity require cluster confirmation.",
+        "Submission order does not imply execution order; see measurement_order.csv for process timestamps and LSF logs for scheduler timestamps.",
         f"Plot status: {plot_status}",
         f"Campaign status: {'COMPLETE' if complete else 'INCOMPLETE'}",
     ]

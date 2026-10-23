@@ -200,14 +200,23 @@ bhist -l JOB_ID
 
 ### Final V1 benchmark
 
-The final benchmark contains 108 measurements: `N=128,256,512`, cubic domains
-with side length `1` or `pi`, six thread counts, and three repetitions. Every
-job is restricted to
-`polus-c4-ib.bmc.hpc.cs.msu.ru`, requests exclusive single-host placement, and
-uses the configured `short` queue and `00:10` walltime. All `N=512`
-repetitions are separate jobs; the three repetitions for each `N=128` and
-`N=256` configuration share one job. This is 60 LSF jobs requesting 510 CPU
-slots in total across all job requests.
+The final benchmark contains **360 independent LSF jobs and measurements**:
+36 configurations (`N=128,256,512`, cubic `L=1,pi`, and
+`threads=1,2,4,8,16,20`) repeated ten times. Each job executes the solver
+exactly once, without warm-ups. All jobs retain the `short` queue, `00:10`
+walltime, exclusive allocation (`-x`), `span[hosts=1]`, and the exact host
+restriction `polus-c4-ib.bmc.hpc.cs.msu.ru`. Requested slots equal the
+OpenMP thread count. Across all requests the sum is 3,060 slots; this is not a
+simultaneous core allocation.
+
+Ten logical rounds each contain every configuration once. Configuration
+order is shuffled independently using `random.Random(20261023 + round)`.
+The seed rule and Python version are recorded in metadata; manifest row order
+is the complete planned submission order. Round equals repetition.
+LSF may reorder execution: per-process UTC start/completion times and job IDs
+are saved, and full LSF logs retain scheduler timestamps. Separate jobs sample
+different scheduling and temporal conditions but do not guarantee independent
+hardware states.
 
 The queue and walltime are defined once in `scripts/polus/config.sh` as
 `POLUS_FULL_V1_QUEUE` and `POLUS_FULL_V1_WALLTIME`. Ten minutes provides
@@ -278,17 +287,19 @@ bash scripts/polus/submit_full_v1.sh --dry-run
 ```
 
 On Polus, verify the queue limit and host, create a new timestamped campaign,
-submit its jobs, and monitor them:
+prepare its files, then submit a bounded batch:
 
 ```sh
 bqueues -l short
 bhosts polus-c4-ib.bmc.hpc.cs.msu.ru
 bash scripts/polus/submit_full_v1.sh --dry-run
-bash scripts/polus/submit_full_v1.sh
+bash scripts/polus/submit_full_v1.sh --prepare
+# Copy the campaign_directory printed above:
+bash scripts/polus/submit_full_v1.sh --submit-next CAMPAIGN_DIRECTORY
 bjobs
 ```
 
-Each invocation creates a different directory such as
+Each `--prepare` invocation creates a different directory such as
 `results/polus/full_v1/2026-10-21_03-30-00/`. It contains the complete manifest,
 incremental submission records, a private solver copy and checksum, generated
 LSF scripts, scheduler logs, and raw measurement files:
@@ -316,24 +327,36 @@ resource summary, including peak-memory information. The campaign is otherwise
 self-contained; execution still requires Bash, LSF, a SHA-256 utility, and the
 Conda installation and environment named in its copied `config.sh`.
 
-There is deliberately no automatic resume. If submission is interrupted or a
-job fails, retain the campaign, inspect `submissions.csv`, `bjobs`, `bhist`, and
-the corresponding files under `jobs/`, `logs/`, and `measurements/`. Submit a
-specific generated job manually only after confirming that doing so cannot
-duplicate an active run:
+Preparation never calls `bsub`. Each `--submit-next` call submits at most
+**12 jobs and 120 requested slots**, preserving manifest order. If the next
+job does not fit the remaining slot budget, the batch stops there. After the
+previous batch has drained, explicitly run the same command again:
 
 ```sh
-bsub < CAMPAIGN_DIRECTORY/jobs/JOB_GROUP.lsf
+bjobs
+bash scripts/polus/submit_full_v1.sh --submit-next CAMPAIGN_DIRECTORY
 ```
 
-Published Polus documentation has mentioned limits of four simultaneously
-running jobs per user and 200 total queued CPU slots, but these values may be
-outdated or account-dependent. The submission plan prints both 60 jobs and 510
-total requested slots. If the scheduler rejects the full campaign because of
-current capacity policy, do not retry automatically or switch queues. Preserve
-the partial `submissions.csv`, identify the job scripts that were not accepted,
-and submit those scripts manually in smaller batches after accepted jobs leave
-the queue.
+These limits count only newly submitted jobs in this invocation. They do not
+account for pending/running jobs in other batches, campaigns, or users; the
+operator must check current scheduler/account limits. There is no polling,
+automatic retry, or automatic rerun of an accepted job, even if it later fails.
+
+The submission record writes an intent before calling `bsub` and immediately
+records each accepted ID. A failure, malformed response, or interrupted intent
+blocks subsequent batches conservatively. Check `bjobs`, `bhist -l JOB_ID`,
+the job name, and `submissions.csv` before manual reconciliation. If LSF
+accepted a job before interruption, record that accepted ID using the same CSV
+schema; never blindly retry. For a confirmed unaccepted attempt, preserve a
+backup of the records before removing that attempt's rows to permit an explicit
+retry. The `.submitting` directory prevents concurrent submitters; after a
+crash, remove it manually only after verifying no submitter is active.
+
+Analysis identifies failed/missing measurements in `missing_or_failed.csv`.
+Inspect raw files and LSF logs. Accepted jobs are never automatically rerun.
+Keep the original campaign intact and document any replacement experiment
+separately; duplicate measurement attempts are flagged rather than silently
+selected for better timings.
 
 After the jobs finish, copy the entire campaign directory to the local machine
 and analyze it without LSF access:
@@ -354,8 +377,15 @@ outputs, failed runs, and missing runs. The comparison tolerance is
 errors down to roughly `4.4e-9`. Statistics and speedups use only valid
 measurements for identical `N`, domain, `K`, and `T`. Incomplete campaigns
 still produce useful partial analysis but return a nonzero status. Core
-analysis uses only the Python standard library; four labeled plots are added
-when matplotlib is available.
+analysis uses only the Python standard library; five labeled plots are added
+when matplotlib is available, including timing boxplots and an ideal speedup
+line. `summary.csv` reports min/max, mean, median, sample standard deviation,
+and CV (sample standard deviation divided by mean). Larger CV indicates more
+variation; all valid outliers remain included. Missing baselines produce blank
+speedups. `measurement_order.csv` records process timestamps and reported host
+spellings; these records alone cannot independently certify physical identity.
+The analyzer recognizes both historical three-repetition formats and the new
+ten-round schema; historical campaigns are not rewritten.
 
 The finite-difference method is second order in space and time. The new error
 plot is a **CFL-scaled, fixed-step-count benchmark**: because both `dt` and `T`
@@ -369,7 +399,7 @@ continues to recognize its historical manifest format and does not rewrite it.
 The new campaign no longer uses the `normal` queue or its former three-hour
 reservation. The short-queue RUNLIMIT, host acceptance, and observed runtime
 still require validation on Polus. Confirm the generated plan and run a small
-preflight before committing cluster resources to all 60 jobs.
+preflight before committing cluster resources to the first batch.
 
 ## Scope
 
