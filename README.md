@@ -4,6 +4,11 @@ This is the correctness-first OpenMP implementation of assignment variant 1.
 It solves the three-dimensional wave equation with homogeneous Dirichlet
 conditions using the specified explicit seven-point finite-difference scheme.
 
+The historical V1 executable remains `build/wave_solver`. A separate,
+numerically equivalent performance variant can be built with `make optimized`
+as `build/wave_solver_opt`. Its design, local measurements, traffic model, and
+non-submitting Polus A/B workflow are documented in `OPTIMIZATION.md`.
+
 `N` is the number of intervals on **each** spatial axis. Node indices are
 `0..N`, so the solver stores `(N+1)^3` nodes per time layer. `T` is physical
 simulation time; it is unrelated to the measured program runtime.

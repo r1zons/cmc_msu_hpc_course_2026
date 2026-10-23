@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+#BSUB -q short
+#BSUB -W 00:10
+#BSUB -x
+#BSUB -R "span[hosts=1]"
+#BSUB -m polus-c4-ib.bmc.hpc.cs.msu.ru
+
+set -u
+
+fail() { printf 'job error: %s\n' "$1" >&2; exit 1; }
+: "${AB_CAMPAIGN:?}"
+: "${AB_ID:?}"
+: "${AB_VARIANT:?}"
+: "${AB_N:?}"
+: "${AB_THREADS:?}"
+: "${AB_REPETITION:?}"
+
+case "$AB_VARIANT" in
+    baseline) solver=$AB_CAMPAIGN/bin/wave_solver_baseline ;;
+    optimized) solver=$AB_CAMPAIGN/bin/wave_solver_optimized ;;
+    *) fail "unknown variant: $AB_VARIANT" ;;
+esac
+[[ -x "$solver" ]] || fail "missing frozen solver: $solver"
+
+export OMP_NUM_THREADS=$AB_THREADS
+export OMP_DYNAMIC=FALSE
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+
+final_time=$(awk -v n="$AB_N" 'BEGIN { printf "%.17g", 10/(sqrt(3)*n) }')
+output=$AB_CAMPAIGN/measurements/$AB_ID.stdout
+error=$AB_CAMPAIGN/measurements/$AB_ID.stderr
+result=$AB_CAMPAIGN/measurements/$AB_ID.csv
+started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+"$solver" --n "$AB_N" --lx 1 --ly 1 --lz 1 \
+    --time "$final_time" --steps 20 --threads "$AB_THREADS" \
+    >"$output" 2>"$error"
+status=$?
+completed=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+if command -v sha256sum >/dev/null 2>&1; then
+    binary_sha256=$(sha256sum "$solver" | awk '{print $1}')
+else
+    binary_sha256=$(shasum -a 256 "$solver" | awk '{print $1}')
+fi
+
+value() { awk -F= -v key="$1" '$1 == key { print $2; exit }' "$output"; }
+printf '%s\n' \
+  'measurement_id,variant,n,threads,repetition,job_id,hostname,binary_sha256,started_at_utc,completed_at_utc,exit_code,effective_threads,solve_wall_seconds,max_absolute_error' \
+  >"$result"
+printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    "$AB_ID" "$AB_VARIANT" "$AB_N" "$AB_THREADS" "$AB_REPETITION" \
+    "${LSB_JOBID:-manual}" "$(hostname -f 2>/dev/null || hostname)" \
+    "$binary_sha256" "$started" "$completed" "$status" "$(value openmp_threads)" \
+    "$(value solve_wall_seconds)" "$(value max_absolute_error)" >>"$result"
+exit "$status"
