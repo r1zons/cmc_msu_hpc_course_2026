@@ -373,5 +373,36 @@ preflight before committing cluster resources to all 60 jobs.
 
 ## Scope
 
+### Targeted OpenMP anomaly recheck
+
+The standalone recheck creates three jobs on the same required Polus host:
+`N=128,L=pi,16 threads` (A), `N=128,L=1,16 threads` (B), and
+`N=128,L=pi,20 threads` (C). Each uses the existing `K=20,CFL=0.5`
+policy, two separate-process warm-ups and ten measured processes. It retains
+stdout, stderr, exit status, affinity diagnostics, and full LSF logs under a
+new `results/polus/openmp_recheck/TIMESTAMP.SUFFIX/` directory. Warm-ups are
+excluded from timing statistics; a new process still starts for every run.
+
+```sh
+source ./setup.sh
+bash scripts/polus/submit_openmp_recheck.sh --dry-run
+bash scripts/polus/submit_openmp_recheck.sh
+bjobs
+"${POLUS_CONDA_BASE}/bin/python3" scripts/analyze_openmp_recheck.py CAMPAIGN_DIRECTORY
+```
+
+Offline analysis also works with local Python >=3.7. Optionally supply
+`--original ORIGINAL_CAMPAIGN_DIRECTORY` to compare original raw A timings.
+Without it the report labels the approximate user-supplied historical values.
+Inspect `analysis/summary.csv`, `analysis/invocation_order.csv`, and
+`analysis/report.txt`; `analysis/missing_or_failed.txt` lists detected issues.
+The optional original-campaign comparison covers A, B, and C and reports each
+new/original median ratio. Invalid, missing, or duplicate runs produce nonzero
+analysis status. Compare invocation order with timings and stderr affinity
+records. The three jobs preserve `short`, `00:10`, exclusive allocation,
+single-host placement, and the full host restriction. CPU slots alone do not
+prove physical-core placement. The runtime affinity diagnostics can add small
+overhead outside the solver timer, so interpret comparisons with that caveat.
+
 V1 uses C++17, `double`, three contiguous time-layer arrays, and OpenMP. It has
 no MPI, CUDA, alternate boundary variants, or algorithmic runtime limit.
