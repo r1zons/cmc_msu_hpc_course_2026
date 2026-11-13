@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Submit using the explicit resource arguments documented in MPI.md.
+set -e
+export LC_ALL=C
+export PYTHONDONTWRITEBYTECODE=1
+: "${WAVE_MPI_ROOT:?set the absolute checkout path}"
+cd "$WAVE_MPI_ROOT"
+source scripts/polus/config.sh
+source "$POLUS_CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$POLUS_CONDA_ENV"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+source scripts/polus/mpi_env.sh
+set -uo pipefail
+: "${LSB_JOBID:?submit via LSF}"
+: "${LSB_MCPU_HOSTS:?missing LSF host allocation}"
+: "${WAVE_MPI_BIN_DIR:=$WAVE_MPI_ROOT/build}"
+export MPI_SOLVER="$WAVE_MPI_BIN_DIR/wave_solver_mpi"
+export MPI_REPORT_BINDINGS=${MPI_REPORT_BINDINGS:-1}
+export MPI_HOSTFILE="${LSB_JOB_TMPDIR:-/tmp}/wave-mpi-hosts.$LSB_JOBID"
+umask 077
+printf '%s\n' "$LSB_MCPU_HOSTS" | awk '
+    NF == 0 || NF % 2 {exit 1}
+    {for (i=1;i<=NF;i+=2) {
+        if ($(i+1) !~ /^[1-9][0-9]*$/) exit 1
+        print $i " slots=" $(i+1) " max_slots=" $(i+1)
+    }}' > "$MPI_HOSTFILE"
+printf 'lsf_job_id=%s\nlsf_slots=%s\nlsf_hosts=%s\nlsf_queue=%s\n' \
+    "$LSB_JOBID" "$LSB_DJOB_NUMPROC" "$LSB_MCPU_HOSTS" "${LSB_QUEUE:-unknown}"
+cat "$WAVE_MPI_BIN_DIR/mpi-build.txt"
+sha256sum "$MPI_SOLVER" "$WAVE_MPI_BIN_DIR/wave_solver_opt"
+if [[ ${WAVE_MPI_TEST:-0} != 0 ]]; then
+    "$PYTHON" tests/test_wave_mpi.py "$WAVE_MPI_BIN_DIR/wave_solver_opt" "$WAVE_MPI_TEST"
+else
+    if [[ ${WAVE_MPI_TWO_NODES:-0} == 1 ]]; then
+        printf '%s\n' "$LSB_MCPU_HOSTS" |
+            awk 'NF != 4 || $1 == $3 || $2 != 16 || $4 != 16 {exit 1}'
+        export MPI_MAP_BY="ppr:$((WAVE_MPI_RANKS/2)):node:PE=$WAVE_MPI_THREADS"
+    fi
+    bash run.sh "${WAVE_MPI_MODE:?}" --ranks "${WAVE_MPI_RANKS:?}" \
+        --threads "${WAVE_MPI_THREADS:?}" --n "${WAVE_MPI_N:?}" \
+        --length "${WAVE_MPI_LENGTH:?}"
+fi

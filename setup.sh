@@ -90,6 +90,10 @@ _wave_setup() {
         PYTHON="$python_executable" || return 1
 
     printf '\nSetup complete: V1 built and tests passed.\n'
+    if [[ ${1:-} == mpi || ${1:-} == hybrid ]]; then
+        source "$repo_root/scripts/polus/mpi_env.sh" || return 1
+        make -C "$repo_root" mpi optimized CXX="$compiler" || return 1
+    fi
     return 0
 }
 

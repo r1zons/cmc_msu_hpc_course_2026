@@ -9,6 +9,8 @@ numerically equivalent performance variant can be built with `make optimized`
 as `build/wave_solver_opt`. Its design, local measurements, traffic model, and
 non-submitting Polus A/B workflow are documented in `OPTIMIZATION.md`.
 
+For the distributed MPI and hybrid MPI+OpenMP builds, see [MPI.md](MPI.md).
+
 `N` is the number of intervals on **each** spatial axis. Node indices are
 `0..N`, so the solver stores `(N+1)^3` nodes per time layer. `T` is physical
 simulation time; it is unrelated to the measured program runtime.

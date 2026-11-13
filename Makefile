@@ -15,6 +15,7 @@ CXXFLAGS ?= -O2 -Wall -Wextra -Wpedantic
 OPENMP_FLAGS ?=
 LDFLAGS ?=
 PYTHON ?= python3
+MPICXX ?= mpicxx
 
 # These flags are part of the project contract. Keep them separate from the
 # user-configurable flags above so command-line overrides cannot remove them.
@@ -25,16 +26,22 @@ override PROJECT_OPENMP_FLAGS := -fopenmp
 BUILD_DIR ?= build
 SOLVER := $(BUILD_DIR)/wave_solver
 OPTIMIZED_SOLVER := $(BUILD_DIR)/wave_solver_opt
+MPI_SOLVER := $(BUILD_DIR)/wave_solver_mpi
 TEST_RUNNER := $(BUILD_DIR)/test_wave
 OPTIMIZED_TEST_RUNNER := $(BUILD_DIR)/test_wave_opt
 COMMON_SOURCE := src/wave.cpp
 OPTIMIZED_SOURCE := src/wave_optimized.cpp
 
-.PHONY: all optimized test test-optimized test-all clean
+.PHONY: all optimized mpi hybrid test test-optimized test-all clean
 
 all: $(SOLVER)
 
 optimized: $(OPTIMIZED_SOLVER)
+
+mpi hybrid: $(MPI_SOLVER)
+
+$(MPI_SOLVER): src/wave_mpi.cpp $(COMMON_SOURCE) include/wave.hpp | $(BUILD_DIR)
+	$(MPICXX) $(PROJECT_CPPFLAGS) $(CPPFLAGS) $(PROJECT_CXXFLAGS) $(CXXFLAGS) $(PROJECT_OPENMP_FLAGS) $(OPENMP_FLAGS) src/wave_mpi.cpp $(COMMON_SOURCE) $(LDFLAGS) $(PROJECT_OPENMP_FLAGS) $(OPENMP_FLAGS) -o $@
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -64,4 +71,4 @@ test-optimized: $(SOLVER) $(OPTIMIZED_SOLVER) $(OPTIMIZED_TEST_RUNNER)
 test-all: test test-optimized
 
 clean:
-	rm -f $(SOLVER) $(OPTIMIZED_SOLVER) $(TEST_RUNNER) $(OPTIMIZED_TEST_RUNNER)
+	rm -f $(SOLVER) $(OPTIMIZED_SOLVER) $(MPI_SOLVER) $(TEST_RUNNER) $(OPTIMIZED_TEST_RUNNER)
