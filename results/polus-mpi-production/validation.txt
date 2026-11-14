@@ -1,0 +1,3 @@
+campaign_status=complete
+expected=540 valid=540
+issues=0
