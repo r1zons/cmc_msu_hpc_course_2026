@@ -1,0 +1,4 @@
+campaign_status=complete
+expected=180 valid=180
+lsf_success=180
+issues=0

@@ -1,0 +1,51 @@
+{
+  "binary_freezing": "Copy executables to bin/, record sha256sum, compiler/MPI versions and flags in metadata.json before jobs.",
+  "campaign_status": "prepared; not submitted",
+  "created_utc": "2026-11-14T02:31:18Z",
+  "manifest_rows": 180,
+  "protocol": {
+    "cfl": 0.5,
+    "hybrid_rank_thread_pairs": [
+      [
+        1,
+        8
+      ],
+      [
+        1,
+        16
+      ],
+      [
+        2,
+        8
+      ]
+    ],
+    "lengths": [
+      1.0,
+      3.141592653589793
+    ],
+    "mpi_ranks": [],
+    "n": [
+      128,
+      256,
+      512
+    ],
+    "repetitions": 10,
+    "slots_per_node": 16,
+    "steps": 20
+  },
+  "protocol_note": "N is intervals per axis; lengths are cubic domain lengths.",
+  "schema_version": 1,
+  "seed": 20261114,
+  "allowed_compute_hosts": [
+    "polus-c2-ib.bmc.hpc.cs.msu.ru",
+    "polus-c3-ib.bmc.hpc.cs.msu.ru"
+  ],
+  "binary_freeze": {
+    "frozen": true,
+    "path": "bin/",
+    "runtime_build_metadata": "bin/build-and-runtime.txt",
+    "sha256_file": "bin/SHA256SUMS"
+  },
+  "exclusive": true,
+  "mapping_2x8": "ppr:1:socket:PE=8"
+}
