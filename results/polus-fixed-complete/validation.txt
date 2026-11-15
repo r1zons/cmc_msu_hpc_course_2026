@@ -1,0 +1,8 @@
+complete=yes
+valid=1440
+original=480
+retry=960
+rank_thread_configurations=24
+problem_configurations=144
+repetitions_per_problem_configuration=10
+issues=0
