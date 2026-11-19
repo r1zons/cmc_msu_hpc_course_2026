@@ -1,0 +1,8 @@
+complete=yes
+valid=432
+arrays=24
+problem_configurations=144
+repetitions=3
+pg5=306
+pg5_pg6=126
+issues=0
